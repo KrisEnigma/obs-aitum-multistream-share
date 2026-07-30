@@ -24,6 +24,10 @@ struct MultistreamOutputEntry {
 	std::chrono::steady_clock::time_point lastBytesTime{};
 	bool stopping = false;
 	bool starting = false;
+	bool wasReconnecting = false;
+	bool reconnectWarningShown = false;
+	std::chrono::steady_clock::time_point liveSince{};
+	std::vector<std::chrono::steady_clock::time_point> recentDisconnects;
 };
 
 class MultistreamDock : public QFrame {
@@ -66,6 +70,9 @@ private:
 	void outputButtonStyle(QPushButton *button);
 	void UpdateOutputStatuses();
 	void SetOutputStatus(MultistreamOutputEntry &entry, const QString &text, const QString &color = QString());
+	void NoteReconnectAttempt(MultistreamOutputEntry &entry);
+	void MaybeShowReconnectLoopWarning(MultistreamOutputEntry &entry);
+	void ResetReconnectTracking(MultistreamOutputEntry &entry);
 	MultistreamOutputEntry *FindOutput(const std::string &name);
 	MultistreamOutputEntry *FindOutput(obs_output_t *output);
 

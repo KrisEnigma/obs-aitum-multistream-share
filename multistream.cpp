@@ -12,8 +12,8 @@
 #include <QPushButton>
 #include <QScrollArea>
 #include <QVBoxLayout>
+#include <algorithm>
 #include <util/config-file.h>
-#include <util/dstr.h>
 #include <util/platform.h>
 
 extern "C" {
@@ -155,6 +155,90 @@ void MultistreamDock::SetOutputStatus(MultistreamOutputEntry &entry, const QStri
 		entry.statusLabel->setStyleSheet(QString::fromUtf8("color: %1;").arg(color));
 }
 
+void MultistreamDock::ResetReconnectTracking(MultistreamOutputEntry &entry)
+{
+	entry.wasReconnecting = false;
+	entry.reconnectWarningShown = false;
+	entry.liveSince = {};
+	entry.recentDisconnects.clear();
+}
+
+void MultistreamDock::NoteReconnectAttempt(MultistreamOutputEntry &entry)
+{
+	const auto now = std::chrono::steady_clock::now();
+	entry.recentDisconnects.push_back(now);
+	constexpr auto window = std::chrono::seconds(20);
+	entry.recentDisconnects.erase(std::remove_if(entry.recentDisconnects.begin(), entry.recentDisconnects.end(),
+						     [now, window](const auto &t) { return now - t > window; }),
+				      entry.recentDisconnects.end());
+}
+
+void MultistreamDock::MaybeShowReconnectLoopWarning(MultistreamOutputEntry &entry)
+{
+	/* Several disconnects in a short window → likely config, not a blip. */
+	constexpr size_t threshold = 3;
+	if (entry.reconnectWarningShown || entry.recentDisconnects.size() < threshold)
+		return;
+
+	entry.reconnectWarningShown = true;
+
+	QString codec = QString::fromUtf8(obs_module_text("ReconnectLoopCodecUnknown"));
+	if (entry.output) {
+		obs_encoder_t *venc = obs_output_get_video_encoder(entry.output);
+		if (venc) {
+			const char *c = obs_encoder_get_codec(venc);
+			if (c && c[0])
+				codec = QString::fromUtf8(c);
+		}
+	}
+
+	const QString name = QString::fromUtf8(entry.name.c_str());
+	const std::string entryName = entry.name;
+	QMetaObject::invokeMethod(
+		this,
+		[this, name, codec, entryName] {
+			QMessageBox box(this);
+			box.setIcon(QMessageBox::Warning);
+			box.setWindowTitle(QString::fromUtf8(obs_module_text("ReconnectLoopTitle")));
+			box.setText(QString::fromUtf8(obs_module_text("ReconnectLoopWarning")).arg(name, codec));
+			auto *stopBtn = box.addButton(QString::fromUtf8(obs_module_text("ReconnectLoopStopRetrying")),
+						      QMessageBox::AcceptRole);
+			box.addButton(QString::fromUtf8(obs_module_text("ReconnectLoopKeepRetrying")),
+				      QMessageBox::RejectRole);
+			box.setDefaultButton(stopBtn);
+			box.exec();
+
+			if (box.clickedButton() != stopBtn)
+				return;
+
+			/* Stop only after the modal event loop is gone. Calling force_stop
+			 * inside QMessageBox::exec can race a queued output release (same
+			 * SIGSEGV as the old double force_stop). */
+			QTimer::singleShot(0, this, [this, entryName] {
+				auto *e = FindOutput(entryName);
+				if (!e || !e->output || e->stopping)
+					return;
+
+				blog(LOG_INFO, "[Aitum Multistream] stop retrying from reconnect warning '%s'",
+				     entryName.c_str());
+				e->stopping = true;
+				e->starting = false;
+				SetOutputStatus(*e, QString::fromUtf8(obs_module_text("StatusStopping")),
+						QString::fromUtf8("rgb(255,180,0)"));
+				if (e->button && e->button->isChecked()) {
+					e->button->blockSignals(true);
+					e->button->setChecked(false);
+					e->button->blockSignals(false);
+					outputButtonStyle(e->button);
+				}
+				obs_output_t *out = e->output;
+				obs_output_set_reconnect_settings(out, 0, 0);
+				obs_output_force_stop(out);
+			});
+		},
+		Qt::QueuedConnection);
+}
+
 void MultistreamDock::UpdateOutputStatuses()
 {
 	const auto now = std::chrono::steady_clock::now();
@@ -165,12 +249,11 @@ void MultistreamDock::UpdateOutputStatuses()
 		if (entry.stopping) {
 			SetOutputStatus(entry, QString::fromUtf8(obs_module_text("StatusStopping")),
 					QString::fromUtf8("rgb(255,180,0)"));
-			/* Only re-stop if OBS is still reconnecting; avoid hammering force_stop
-			 * after a clean stop has already begun. */
-			if (entry.output && obs_output_reconnecting(entry.output)) {
+			/* Keep reconnect disabled while stop finishes. Do not call
+			 * force_stop again here — a second stop can race the queued
+			 * output release from stream_output_stop (SIGSEGV). */
+			if (entry.output)
 				obs_output_set_reconnect_settings(entry.output, 0, 0);
-				obs_output_force_stop(entry.output);
-			}
 			continue;
 		}
 
@@ -187,12 +270,21 @@ void MultistreamDock::UpdateOutputStatuses()
 		}
 
 		if (obs_output_reconnecting(entry.output)) {
+			entry.liveSince = {};
+			if (!entry.wasReconnecting) {
+				entry.wasReconnecting = true;
+				NoteReconnectAttempt(entry);
+				MaybeShowReconnectLoopWarning(entry);
+			}
 			SetOutputStatus(entry, QString::fromUtf8(obs_module_text("StatusReconnecting")),
 					QString::fromUtf8("rgb(255,180,0)"));
 			continue;
 		}
 
+		entry.wasReconnecting = false;
+
 		if (!obs_output_active(entry.output)) {
+			entry.liveSince = {};
 			if (entry.starting || (entry.button && entry.button->isChecked())) {
 				SetOutputStatus(entry, QString::fromUtf8(obs_module_text("StatusConnecting")),
 						QString::fromUtf8("rgb(255,180,0)"));
@@ -202,6 +294,14 @@ void MultistreamDock::UpdateOutputStatuses()
 				entry.lastBytesTime = {};
 			}
 			continue;
+		}
+
+		if (entry.liveSince.time_since_epoch().count() == 0)
+			entry.liveSince = now;
+		else if (now - entry.liveSince >= std::chrono::seconds(15)) {
+			/* Stable again — allow a future loop to warn once more. */
+			entry.recentDisconnects.clear();
+			entry.reconnectWarningShown = false;
 		}
 
 		const uint64_t bytes = obs_output_get_total_bytes(entry.output);
@@ -1136,34 +1236,8 @@ bool MultistreamDock::StartOutput(obs_data_t *settings, QPushButton *streamButto
 
 	obs_output_set_video_encoder(output, venc);
 	obs_output_set_audio_encoder(output, aenc, 0);
-
-	const char *codec = obs_encoder_get_codec(venc);
-	/* Warn only for ingest hosts known to reject HEVC (Twitch / Kick).
-	 * YouTube, TikTok, and others can accept it — don't block those. */
-	const bool hevc_risky_ingest =
-		codec && astrcmpi(codec, "hevc") == 0 && server &&
-		(strstr(server, "twitch.tv") || strstr(server, "twitch.com") ||
-		 strstr(server, "kick.com") || strstr(server, "global-contribute.live-video.net") ||
-		 (strstr(server, "contribute.live-video.net") && !strstr(server, "global-contribute")));
-
 	obs_encoder_release(venc);
 	obs_encoder_release(aenc);
-
-	if (hevc_risky_ingest) {
-		blog(LOG_WARNING,
-		     "[Aitum Multistream] '%s' is using HEVC on an ingest that typically rejects it.",
-		     name ? name : "");
-		auto button = QMessageBox::warning(
-			this, QString::fromUtf8(obs_module_text("HevcDestinationTitle")),
-			QString::fromUtf8(obs_module_text("HevcDestinationWarning")),
-			QMessageBox::Cancel | QMessageBox::Ignore, QMessageBox::Cancel);
-		if (button != QMessageBox::Ignore) {
-			auto service = obs_output_get_service(output);
-			obs_output_release(output);
-			obs_service_release(service);
-			return false;
-		}
-	}
 
 	auto *entry = FindOutput(name ? name : "");
 	if (!entry) {
@@ -1177,6 +1251,7 @@ bool MultistreamDock::StartOutput(obs_data_t *settings, QPushButton *streamButto
 	entry->starting = true;
 	entry->lastBytes = 0;
 	entry->lastBytesTime = {};
+	ResetReconnectTracking(*entry);
 	SetOutputStatus(*entry, QString::fromUtf8(obs_module_text("StatusConnecting")),
 			QString::fromUtf8("rgb(255,180,0)"));
 
@@ -1230,6 +1305,16 @@ void MultistreamDock::stream_output_stop(void *data, calldata_t *calldata)
 	if (entry->output != output)
 		return;
 
+	/* OBS fires stop before auto-reconnect; keep the entry so status/loop
+	 * detection still work. User-initiated stop sets entry->stopping. */
+	if (!entry->stopping && obs_output_reconnecting(output)) {
+		QMetaObject::invokeMethod(
+			md,
+			[md] { md->UpdateOutputStatuses(); },
+			Qt::QueuedConnection);
+		return;
+	}
+
 	auto button = entry->button;
 	if (button && button->isChecked()) {
 		QMetaObject::invokeMethod(
@@ -1243,6 +1328,7 @@ void MultistreamDock::stream_output_stop(void *data, calldata_t *calldata)
 
 	entry->stopping = false;
 	entry->starting = false;
+	md->ResetReconnectTracking(*entry);
 	entry->output = nullptr;
 	entry->lastBytes = 0;
 	entry->lastBytesTime = {};
