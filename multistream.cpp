@@ -13,6 +13,7 @@
 #include <QScrollArea>
 #include <QVBoxLayout>
 #include <util/config-file.h>
+#include <util/dstr.h>
 #include <util/platform.h>
 
 extern "C" {
@@ -1137,7 +1138,7 @@ bool MultistreamDock::StartOutput(obs_data_t *settings, QPushButton *streamButto
 	obs_output_set_audio_encoder(output, aenc, 0);
 
 	const char *codec = obs_encoder_get_codec(venc);
-	const bool twitch_hevc = codec && strcasecmp(codec, "hevc") == 0 && server &&
+	const bool twitch_hevc = codec && astrcmpi(codec, "hevc") == 0 && server &&
 				 (strstr(server, "live-video.net") || strstr(server, "twitch.tv") ||
 				  strstr(server, "twitch.com"));
 
