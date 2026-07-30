@@ -224,3 +224,104 @@ obs_encoder_t *resolve_audio_encoder(obs_data_t *settings, obs_data_array_t *out
 
 	return create_or_get_audio_encoder(settings);
 }
+
+static void copy_video_encoder_fields(obs_data_t *dst, obs_data_t *src)
+{
+	const char *venc = obs_data_get_string(src, "video_encoder");
+	obs_data_set_string(dst, "video_encoder", venc ? venc : "");
+	obs_data_set_int(dst, "video_encoder_index", obs_data_get_int(src, "video_encoder_index"));
+	obs_data_set_bool(dst, "scale", obs_data_get_bool(src, "scale"));
+	obs_data_set_int(dst, "width", obs_data_get_int(src, "width"));
+	obs_data_set_int(dst, "height", obs_data_get_int(src, "height"));
+	obs_data_set_int(dst, "scale_type", obs_data_get_int(src, "scale_type"));
+	obs_data_set_int(dst, "frame_rate_divisor", obs_data_get_int(src, "frame_rate_divisor"));
+
+	obs_data_t *ves = obs_data_get_obj(src, "video_encoder_settings");
+	if (ves) {
+		obs_data_t *copy = obs_data_create();
+		obs_data_apply(copy, ves);
+		obs_data_set_obj(dst, "video_encoder_settings", copy);
+		obs_data_release(copy);
+		obs_data_release(ves);
+	} else {
+		obs_data_erase(dst, "video_encoder_settings");
+	}
+}
+
+static void copy_audio_encoder_fields(obs_data_t *dst, obs_data_t *src)
+{
+	const char *aenc = obs_data_get_string(src, "audio_encoder");
+	obs_data_set_string(dst, "audio_encoder", aenc ? aenc : "");
+	obs_data_set_int(dst, "audio_encoder_index", obs_data_get_int(src, "audio_encoder_index"));
+	obs_data_set_int(dst, "audio_track", obs_data_get_int(src, "audio_track"));
+
+	obs_data_t *aes = obs_data_get_obj(src, "audio_encoder_settings");
+	if (aes) {
+		obs_data_t *copy = obs_data_create();
+		obs_data_apply(copy, aes);
+		obs_data_set_obj(dst, "audio_encoder_settings", copy);
+		obs_data_release(copy);
+		obs_data_release(aes);
+	} else {
+		obs_data_erase(dst, "audio_encoder_settings");
+	}
+}
+
+static obs_data_t *resolve_dedicated_settings(obs_data_array_t *outputs, obs_data_t *settings, const char *encoder_field)
+{
+	const char *encoder = obs_data_get_string(settings, encoder_field);
+	if (!encoder_is_share(encoder))
+		return settings;
+
+	const char *error_key = nullptr;
+	obs_data_t *owner = resolve_share_owner(outputs, encoder, encoder_field, &error_key);
+	return owner; /* caller must release if != settings; may be null */
+}
+
+void inherit_encoder_settings_from_removed_owner(obs_data_array_t *outputs, obs_data_t *removed)
+{
+	if (!outputs || !removed)
+		return;
+
+	const char *removed_name = obs_data_get_string(removed, "name");
+	if (!removed_name || !removed_name[0])
+		return;
+
+	const std::string share_id = encoder_share_id(removed_name);
+	obs_data_t *video_src = resolve_dedicated_settings(outputs, removed, "video_encoder");
+	obs_data_t *audio_src = resolve_dedicated_settings(outputs, removed, "audio_encoder");
+	if (!video_src)
+		video_src = removed;
+	if (!audio_src)
+		audio_src = removed;
+
+	const size_t count = obs_data_array_count(outputs);
+	for (size_t i = 0; i < count; i++) {
+		obs_data_t *item = obs_data_array_item(outputs, i);
+		if (!item || item == removed) {
+			obs_data_release(item);
+			continue;
+		}
+
+		const char *venc = obs_data_get_string(item, "video_encoder");
+		if (venc && share_id == venc) {
+			copy_video_encoder_fields(item, video_src);
+			blog(LOG_INFO, "[Aitum Multistream] '%s' inherited video encoder settings from removed '%s'",
+			     obs_data_get_string(item, "name"), removed_name);
+		}
+
+		const char *aenc = obs_data_get_string(item, "audio_encoder");
+		if (aenc && share_id == aenc) {
+			copy_audio_encoder_fields(item, audio_src);
+			blog(LOG_INFO, "[Aitum Multistream] '%s' inherited audio encoder settings from removed '%s'",
+			     obs_data_get_string(item, "name"), removed_name);
+		}
+
+		obs_data_release(item);
+	}
+
+	if (video_src != removed)
+		obs_data_release(video_src);
+	if (audio_src != removed)
+		obs_data_release(audio_src);
+}

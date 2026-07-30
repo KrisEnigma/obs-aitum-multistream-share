@@ -1138,24 +1138,31 @@ bool MultistreamDock::StartOutput(obs_data_t *settings, QPushButton *streamButto
 	obs_output_set_audio_encoder(output, aenc, 0);
 
 	const char *codec = obs_encoder_get_codec(venc);
-	const bool twitch_hevc = codec && astrcmpi(codec, "hevc") == 0 && server &&
-				 (strstr(server, "live-video.net") || strstr(server, "twitch.tv") ||
-				  strstr(server, "twitch.com"));
+	/* Warn only for ingest hosts known to reject HEVC (Twitch / Kick).
+	 * YouTube, TikTok, and others can accept it — don't block those. */
+	const bool hevc_risky_ingest =
+		codec && astrcmpi(codec, "hevc") == 0 && server &&
+		(strstr(server, "twitch.tv") || strstr(server, "twitch.com") ||
+		 strstr(server, "kick.com") || strstr(server, "global-contribute.live-video.net") ||
+		 (strstr(server, "contribute.live-video.net") && !strstr(server, "global-contribute")));
 
 	obs_encoder_release(venc);
 	obs_encoder_release(aenc);
 
-	if (twitch_hevc) {
+	if (hevc_risky_ingest) {
 		blog(LOG_WARNING,
-		     "[Aitum Multistream] '%s' is using HEVC to Twitch RTMP; Twitch expects H.264. "
-		     "Switch Advanced video encoder to Apple VT H264 (or x264).",
+		     "[Aitum Multistream] '%s' is using HEVC on an ingest that typically rejects it.",
 		     name ? name : "");
-		QMessageBox::warning(this, QString::fromUtf8(obs_module_text("TwitchHevcTitle")),
-				     QString::fromUtf8(obs_module_text("TwitchHevcWarning")));
-		auto service = obs_output_get_service(output);
-		obs_output_release(output);
-		obs_service_release(service);
-		return false;
+		auto button = QMessageBox::warning(
+			this, QString::fromUtf8(obs_module_text("HevcDestinationTitle")),
+			QString::fromUtf8(obs_module_text("HevcDestinationWarning")),
+			QMessageBox::Cancel | QMessageBox::Ignore, QMessageBox::Cancel);
+		if (button != QMessageBox::Ignore) {
+			auto service = obs_output_get_service(output);
+			obs_output_release(output);
+			obs_service_release(service);
+			return false;
+		}
 	}
 
 	auto *entry = FindOutput(name ? name : "");

@@ -1001,6 +1001,7 @@ void OBSBasicSettings::AddServer(QFormLayout *outputsLayout, obs_data_t *setting
 	removeButton->setProperty("themeID", QVariant(QString::fromUtf8("removeIconSmall")));
 	removeButton->setProperty("class", "icon-minus");
 	connect(removeButton, &QPushButton::clicked, [this, outputsLayout, serverGroup, settings, outputs] {
+		inherit_encoder_settings_from_removed_owner(outputs, settings);
 		outputsLayout->removeWidget(serverGroup);
 		RemoveWidget(serverGroup);
 		auto count = obs_data_array_count(outputs);
@@ -1013,6 +1014,9 @@ void OBSBasicSettings::AddServer(QFormLayout *outputsLayout, obs_data_t *setting
 			}
 			obs_data_release(item);
 		}
+		/* Reload so Share-from dropdowns / encoder fields reflect inheritance. */
+		LoadSettings(main_settings);
+		LoadVerticalSettings(false);
 	});
 
 	// Edit button

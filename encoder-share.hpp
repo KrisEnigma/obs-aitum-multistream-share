@@ -45,3 +45,7 @@ obs_data_t *find_output_settings(obs_data_array_t *outputs, const char *name);
 obs_encoder_t *resolve_video_encoder(obs_data_t *settings, obs_data_array_t *outputs, const char **error_key);
 
 obs_encoder_t *resolve_audio_encoder(obs_data_t *settings, obs_data_array_t *outputs, const char **error_key);
+
+/* When removing an output, copy that owner's dedicated encoder settings into
+ * any destinations that were sharing from it so they keep working. */
+void inherit_encoder_settings_from_removed_owner(obs_data_array_t *outputs, obs_data_t *removed);
