@@ -32,6 +32,7 @@
 #include <util/config-file.h>
 #include "output-dialog.hpp"
 #include "config-utils.hpp"
+#include "encoder-share.hpp"
 
 #ifndef _WIN32
 #include <dlfcn.h>
@@ -747,14 +748,16 @@ void OBSBasicSettings::AddServer(QFormLayout *outputsLayout, obs_data_t *setting
 
 	connect(videoEncoder, &QComboBox::currentIndexChanged,
 		[this, serverGroup, advancedGroupLayout, videoPageLayout, videoEncoder, videoEncoderIndex, videoEncoderGroup,
-		 videoEncoderGroupLayout, settings, videoPage, main] {
+		 videoEncoderGroupLayout, settings, videoPage] {
 			auto encoder_string = videoEncoder->currentData().toString().toUtf8();
 			auto encoder = encoder_string.constData();
 			const bool encoder_changed = strcmp(obs_data_get_string(settings, "video_encoder"), encoder) != 0;
 			if (encoder_changed)
 				obs_data_set_string(settings, "video_encoder", encoder);
-			if (!encoder || encoder[0] == '\0') {
+			if (!encoder || encoder[0] == '\0' || encoder_is_share(encoder)) {
 				if (!videoEncoderIndex) {
+				} else if (encoder_is_share(encoder)) {
+					videoPageLayout->setRowVisible(videoEncoderIndex, false);
 				} else if (config_get_bool(obs_frontend_get_profile_config(), "Stream1", "EnableMultitrackVideo")) {
 					videoPageLayout->setRowVisible(videoEncoderIndex, true);
 				} else {
@@ -815,7 +818,30 @@ void OBSBasicSettings::AddServer(QFormLayout *outputsLayout, obs_data_t *setting
 		if (strcmp(type, current_type) == 0)
 			videoEncoder->setCurrentIndex(videoEncoder->count() - 1);
 	}
+
+	/* Peer-share options: reuse another destination's dedicated encoder. */
+	const char *self_name = obs_data_get_string(settings, "name");
+	const size_t output_count = obs_data_array_count(outputs);
+	for (size_t oi = 0; oi < output_count; oi++) {
+		obs_data_t *other = obs_data_array_item(outputs, oi);
+		const char *other_name = obs_data_get_string(other, "name");
+		const char *other_venc = obs_data_get_string(other, "video_encoder");
+		const bool can_share = other_name && other_name[0] && (!self_name || strcmp(other_name, self_name) != 0) &&
+				       other_venc && other_venc[0] && !encoder_is_share(other_venc);
+		if (can_share) {
+			const QString share_label =
+				QString::fromUtf8(obs_module_text("ShareEncoderFrom")).arg(QString::fromUtf8(other_name));
+			const QString share_id = QString::fromStdString(encoder_share_id(other_name));
+			videoEncoder->addItem(share_label, share_id);
+			if (current_type && strcmp(current_type, share_id.toUtf8().constData()) == 0)
+				videoEncoder->setCurrentIndex(videoEncoder->count() - 1);
+		}
+		obs_data_release(other);
+	}
+
 	if (videoEncoder->currentIndex() <= 0)
+		videoEncoderGroup->setVisible(false);
+	else if (encoder_is_share(current_type))
 		videoEncoderGroup->setVisible(false);
 
 	auto audioEncoder = new QComboBox;
@@ -849,6 +875,7 @@ void OBSBasicSettings::AddServer(QFormLayout *outputsLayout, obs_data_t *setting
 	audioPageLayout->addRow(audioEncoderGroup);
 
 	int audio_encoder_index = 0;
+	bool audio_share_selected = false;
 	current_type = obs_data_get_string(settings, "audio_encoder");
 	idx = 0;
 	while (obs_enum_encoder_types(idx++, &type)) {
@@ -865,6 +892,25 @@ void OBSBasicSettings::AddServer(QFormLayout *outputsLayout, obs_data_t *setting
 			audio_encoder_index = audioEncoder->count() - 1;
 	}
 
+	for (size_t oi = 0; oi < output_count; oi++) {
+		obs_data_t *other = obs_data_array_item(outputs, oi);
+		const char *other_name = obs_data_get_string(other, "name");
+		const char *other_aenc = obs_data_get_string(other, "audio_encoder");
+		const bool can_share = other_name && other_name[0] && (!self_name || strcmp(other_name, self_name) != 0) &&
+				       other_aenc && other_aenc[0] && !encoder_is_share(other_aenc);
+		if (can_share) {
+			const QString share_label =
+				QString::fromUtf8(obs_module_text("ShareEncoderFrom")).arg(QString::fromUtf8(other_name));
+			const QString share_id = QString::fromStdString(encoder_share_id(other_name));
+			audioEncoder->addItem(share_label, share_id);
+			if (current_type && strcmp(current_type, share_id.toUtf8().constData()) == 0) {
+				audio_encoder_index = audioEncoder->count() - 1;
+				audio_share_selected = true;
+			}
+		}
+		obs_data_release(other);
+	}
+
 	connect(audioEncoder, &QComboBox::currentIndexChanged,
 		[this, serverGroup, advancedGroupLayout, audioPageLayout, audioEncoder, audioEncoderGroup, audioEncoderGroupLayout,
 		 audioTrack, settings, audioPage] {
@@ -874,6 +920,15 @@ void OBSBasicSettings::AddServer(QFormLayout *outputsLayout, obs_data_t *setting
 						     strcmp(obs_data_get_string(settings, "audio_encoder"), encoder) != 0;
 			if (encoder_changed)
 				obs_data_set_string(settings, "audio_encoder", encoder);
+
+			if (encoder_is_share(encoder)) {
+				audioEncoderGroup->setVisible(false);
+				audioPageLayout->setRowVisible(audioTrack, false);
+				return;
+			}
+
+			audioEncoderGroup->setVisible(true);
+			audioPageLayout->setRowVisible(audioTrack, true);
 
 			auto t = audio_encoder_properties.find(serverGroup);
 			if (t != audio_encoder_properties.end()) {
@@ -908,6 +963,10 @@ void OBSBasicSettings::AddServer(QFormLayout *outputsLayout, obs_data_t *setting
 	if (audio_encoder_index == audioEncoder->currentIndex())
 		audioEncoder->setCurrentIndex(-1);
 	audioEncoder->setCurrentIndex(audio_encoder_index);
+	if (audio_share_selected) {
+		audioEncoderGroup->setVisible(false);
+		audioPageLayout->setRowVisible(audioTrack, false);
+	}
 
 	auto advancedButton = new QCheckBox(QString::fromUtf8(obs_module_text("EditEncoderSettings")));
 	advancedButton->setCheckable(true);

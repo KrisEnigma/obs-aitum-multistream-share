@@ -1,4 +1,5 @@
 #include "config-utils.hpp"
+#include "encoder-share.hpp"
 #include "multistream.hpp"
 #include "obs-module.h"
 #include "version.h"
@@ -851,91 +852,32 @@ bool MultistreamDock::StartOutput(obs_data_t *settings, QPushButton *streamButto
 	obs_encoder_t *venc = nullptr;
 	obs_encoder_t *aenc = nullptr;
 	auto advanced = obs_data_get_bool(settings, "advanced");
-	if (advanced) {
-		auto venc_name = obs_data_get_string(settings, "video_encoder");
-		if (!venc_name || venc_name[0] == '\0') {
-			//use main encoder
-			auto main_output = obs_frontend_get_streaming_output();
-			if (!obs_output_active(main_output)) {
-				obs_output_release(main_output);
-				blog(LOG_WARNING, "[Aitum Multistream] failed to start stream '%s' because main was not started",
-				     obs_data_get_string(settings, "name"));
-				QMessageBox::warning(this, QString::fromUtf8(obs_module_text("MainOutputNotActive")),
-						     QString::fromUtf8(obs_module_text("MainOutputNotActive")));
-				return false;
-			}
-			auto vei = (int)obs_data_get_int(settings, "video_encoder_index");
-			venc = obs_output_get_video_encoder2(main_output, vei);
-			obs_output_release(main_output);
-			if (!venc) {
-				blog(LOG_WARNING,
-				     "[Aitum Multistream] failed to start stream '%s' because encoder index %d was not found",
-				     obs_data_get_string(settings, "name"), vei);
-				QMessageBox::warning(this, QString::fromUtf8(obs_module_text("MainOutputEncoderIndexNotFound")),
-						     QString::fromUtf8(obs_module_text("MainOutputEncoderIndexNotFound")));
-				return false;
-			}
-		} else {
-			obs_data_t *s = nullptr;
-			auto ves = obs_data_get_obj(settings, "video_encoder_settings");
-			if (ves) {
-				s = obs_data_create();
-				obs_data_apply(s, ves);
-				obs_data_release(ves);
-			}
-			std::string video_encoder_name = "aitum_multi_video_encoder_";
-			video_encoder_name += name;
-			venc = obs_video_encoder_create(venc_name, video_encoder_name.c_str(), s, nullptr);
-			obs_data_release(s);
-			obs_encoder_set_video(venc, obs_get_video());
-			auto divisor = obs_data_get_int(settings, "frame_rate_divisor");
-			if (divisor > 1)
-				obs_encoder_set_frame_rate_divisor(venc, (uint32_t)divisor);
+	obs_data_array_t *all_outputs = current_config ? obs_data_get_array(current_config, "outputs") : nullptr;
 
-			bool scale = obs_data_get_bool(settings, "scale");
-			if (scale) {
-				obs_encoder_set_scaled_size(venc, (uint32_t)obs_data_get_int(settings, "width"),
-							    (uint32_t)obs_data_get_int(settings, "height"));
-				obs_encoder_set_gpu_scale_type(venc, (obs_scale_type)obs_data_get_int(settings, "scale_type"));
-			}
+	if (advanced) {
+		const char *error_key = nullptr;
+		venc = resolve_video_encoder(settings, all_outputs, &error_key);
+		if (!venc) {
+			blog(LOG_WARNING, "[Aitum Multistream] failed to resolve video encoder for '%s' (%s)", name,
+			     error_key ? error_key : "unknown");
+			QMessageBox::warning(this,
+					     QString::fromUtf8(obs_module_text(error_key ? error_key : "MainOutputNotActive")),
+					     QString::fromUtf8(obs_module_text(error_key ? error_key : "MainOutputNotActive")));
+			obs_data_array_release(all_outputs);
+			return false;
 		}
-		auto aenc_name = obs_data_get_string(settings, "audio_encoder");
-		if (!aenc_name || aenc_name[0] == '\0') {
-			//use main encoder
-			auto main_output = obs_frontend_get_streaming_output();
-			if (!obs_output_active(main_output)) {
-				obs_output_release(main_output);
-				blog(LOG_WARNING, "[Aitum Multistream] failed to start stream '%s' because main was not started",
-				     obs_data_get_string(settings, "name"));
-				QMessageBox::warning(this, QString::fromUtf8(obs_module_text("MainOutputNotActive")),
-						     QString::fromUtf8(obs_module_text("MainOutputNotActive")));
-				return false;
-			}
-			auto aei = (int)obs_data_get_int(settings, "audio_encoder_index");
-			aenc = obs_output_get_audio_encoder(main_output, aei);
-			obs_output_release(main_output);
-			if (!aenc) {
-				blog(LOG_WARNING,
-				     "[Aitum Multistream] failed to start stream '%s' because encoder index %d was not found",
-				     obs_data_get_string(settings, "name"), aei);
-				QMessageBox::warning(this, QString::fromUtf8(obs_module_text("MainOutputEncoderIndexNotFound")),
-						     QString::fromUtf8(obs_module_text("MainOutputEncoderIndexNotFound")));
-				return false;
-			}
-		} else {
-			obs_data_t *s = nullptr;
-			auto aes = obs_data_get_obj(settings, "audio_encoder_settings");
-			if (aes) {
-				s = obs_data_create();
-				obs_data_apply(s, aes);
-				obs_data_release(aes);
-			}
-			std::string audio_encoder_name = "aitum_multi_audio_encoder_";
-			audio_encoder_name += name;
-			aenc = obs_audio_encoder_create(aenc_name, audio_encoder_name.c_str(), s,
-							obs_data_get_int(settings, "audio_track"), nullptr);
-			obs_data_release(s);
-			obs_encoder_set_audio(aenc, obs_get_audio());
+
+		error_key = nullptr;
+		aenc = resolve_audio_encoder(settings, all_outputs, &error_key);
+		if (!aenc) {
+			blog(LOG_WARNING, "[Aitum Multistream] failed to resolve audio encoder for '%s' (%s)", name,
+			     error_key ? error_key : "unknown");
+			QMessageBox::warning(this,
+					     QString::fromUtf8(obs_module_text(error_key ? error_key : "MainOutputNotActive")),
+					     QString::fromUtf8(obs_module_text(error_key ? error_key : "MainOutputNotActive")));
+			obs_encoder_release(venc);
+			obs_data_array_release(all_outputs);
+			return false;
 		}
 	} else {
 		auto main_output = obs_frontend_get_streaming_output();
@@ -946,13 +888,21 @@ bool MultistreamDock::StartOutput(obs_data_t *settings, QPushButton *streamButto
 			     obs_data_get_string(settings, "name"));
 			QMessageBox::warning(this, QString::fromUtf8(obs_module_text("MainOutputNotActive")),
 					     QString::fromUtf8(obs_module_text("MainOutputNotActive")));
+			obs_data_array_release(all_outputs);
 			return false;
 		}
 
 		aenc = obs_output_get_audio_encoder(main_output, 0);
 		obs_output_release(main_output);
+		if (venc)
+			venc = obs_encoder_get_ref(venc);
+		if (aenc)
+			aenc = obs_encoder_get_ref(aenc);
 	}
+	obs_data_array_release(all_outputs);
 	if (!aenc || !venc) {
+		obs_encoder_release(venc);
+		obs_encoder_release(aenc);
 		return false;
 	}
 	auto server = obs_data_get_string(settings, "stream_server");
@@ -1024,6 +974,8 @@ bool MultistreamDock::StartOutput(obs_data_t *settings, QPushButton *streamButto
 
 	obs_output_set_video_encoder(output, venc);
 	obs_output_set_audio_encoder(output, aenc, 0);
+	obs_encoder_release(venc);
+	obs_encoder_release(aenc);
 
 	obs_output_start(output);
 

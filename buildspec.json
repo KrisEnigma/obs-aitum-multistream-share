@@ -37,9 +37,9 @@
         }
     },
     "name": "aitum-multistream",
-    "displayName": "Aitum Multistream",
-    "version": "1.0.8",
-    "author": "Aitum",
+    "displayName": "Aitum Multistream (Encoder Share)",
+    "version": "1.0.9",
+    "author": "Aitum / Encoder Share Fork",
     "website": "https://aitum.tv",
     "email": "support@aitum.tv",
     "uuids": {

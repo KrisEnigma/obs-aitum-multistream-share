@@ -56,6 +56,7 @@ endif()
 target_sources(${PROJECT_NAME} PRIVATE
   config-dialog.cpp
   config-utils.cpp
+  encoder-share.cpp
   output-dialog.cpp
   stream-key-input.cpp
   multistream.cpp
@@ -63,6 +64,7 @@ target_sources(${PROJECT_NAME} PRIVATE
 	resources.qrc
 	config-dialog.hpp
 	config-utils.hpp
+	encoder-share.hpp
 	output-dialog.hpp
 	stream-key-input.hpp
     multistream.hpp
