@@ -4,12 +4,27 @@
 #include <obs.h>
 #include <obs-frontend-api.h>
 #include <QFrame>
+#include <QLabel>
 #include <QPushButton>
 #include <QString>
 #include <QTimer>
 #include <QVBoxLayout>
+#include <chrono>
+#include <string>
+#include <vector>
 
 class OBSBasicSettings;
+
+struct MultistreamOutputEntry {
+	std::string name;
+	obs_output_t *output = nullptr;
+	QPushButton *button = nullptr;
+	QLabel *statusLabel = nullptr;
+	uint64_t lastBytes = 0;
+	std::chrono::steady_clock::time_point lastBytesTime{};
+	bool stopping = false;
+	bool starting = false;
+};
 
 class MultistreamDock : public QFrame {
 	Q_OBJECT
@@ -36,7 +51,7 @@ private:
 	video_t *mainVideo = nullptr;
 	std::vector<video_t *> oldVideo;
 
-	std::vector<std::tuple<std::string, obs_output_t *, QPushButton *>> outputs;
+	std::vector<MultistreamOutputEntry> outputs;
 	obs_data_array_t *vertical_outputs = nullptr;
 	bool exiting = false;
 	bool finished_loading = false;
@@ -49,6 +64,10 @@ private:
 	bool StartOutput(obs_data_t *settings, QPushButton *streamButton);
 
 	void outputButtonStyle(QPushButton *button);
+	void UpdateOutputStatuses();
+	void SetOutputStatus(MultistreamOutputEntry &entry, const QString &text, const QString &color = QString());
+	MultistreamOutputEntry *FindOutput(const std::string &name);
+	MultistreamOutputEntry *FindOutput(obs_output_t *output);
 
 	void storeMainStreamEncoders();
 

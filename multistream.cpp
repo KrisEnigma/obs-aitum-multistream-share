@@ -125,6 +125,107 @@ void MultistreamDock::outputButtonStyle(QPushButton *button)
 	button->setIcon(button->isChecked() ? streamActiveIcon : streamInactiveIcon);
 }
 
+MultistreamOutputEntry *MultistreamDock::FindOutput(const std::string &name)
+{
+	for (auto &entry : outputs) {
+		if (entry.name == name)
+			return &entry;
+	}
+	return nullptr;
+}
+
+MultistreamOutputEntry *MultistreamDock::FindOutput(obs_output_t *output)
+{
+	for (auto &entry : outputs) {
+		if (entry.output == output)
+			return &entry;
+	}
+	return nullptr;
+}
+
+void MultistreamDock::SetOutputStatus(MultistreamOutputEntry &entry, const QString &text, const QString &color)
+{
+	if (!entry.statusLabel)
+		return;
+	entry.statusLabel->setText(text);
+	if (color.isEmpty())
+		entry.statusLabel->setStyleSheet(QString::fromUtf8("color: palette(text);"));
+	else
+		entry.statusLabel->setStyleSheet(QString::fromUtf8("color: %1;").arg(color));
+}
+
+void MultistreamDock::UpdateOutputStatuses()
+{
+	const auto now = std::chrono::steady_clock::now();
+	for (auto &entry : outputs) {
+		if (!entry.statusLabel)
+			continue;
+
+		if (entry.stopping) {
+			SetOutputStatus(entry, QString::fromUtf8(obs_module_text("StatusStopping")),
+					QString::fromUtf8("rgb(255,180,0)"));
+			/* Only re-stop if OBS is still reconnecting; avoid hammering force_stop
+			 * after a clean stop has already begun. */
+			if (entry.output && obs_output_reconnecting(entry.output)) {
+				obs_output_set_reconnect_settings(entry.output, 0, 0);
+				obs_output_force_stop(entry.output);
+			}
+			continue;
+		}
+
+		if (!entry.output) {
+			if (entry.starting || (entry.button && entry.button->isChecked())) {
+				SetOutputStatus(entry, QString::fromUtf8(obs_module_text("StatusConnecting")),
+						QString::fromUtf8("rgb(255,180,0)"));
+			} else {
+				SetOutputStatus(entry, QString::fromUtf8(obs_module_text("StatusIdle")));
+				entry.lastBytes = 0;
+				entry.lastBytesTime = {};
+			}
+			continue;
+		}
+
+		if (obs_output_reconnecting(entry.output)) {
+			SetOutputStatus(entry, QString::fromUtf8(obs_module_text("StatusReconnecting")),
+					QString::fromUtf8("rgb(255,180,0)"));
+			continue;
+		}
+
+		if (!obs_output_active(entry.output)) {
+			if (entry.starting || (entry.button && entry.button->isChecked())) {
+				SetOutputStatus(entry, QString::fromUtf8(obs_module_text("StatusConnecting")),
+						QString::fromUtf8("rgb(255,180,0)"));
+			} else {
+				SetOutputStatus(entry, QString::fromUtf8(obs_module_text("StatusIdle")));
+				entry.lastBytes = 0;
+				entry.lastBytesTime = {};
+			}
+			continue;
+		}
+
+		const uint64_t bytes = obs_output_get_total_bytes(entry.output);
+		double kbps = 0.0;
+		if (entry.lastBytesTime.time_since_epoch().count() != 0) {
+			const auto ms =
+				std::chrono::duration_cast<std::chrono::milliseconds>(now - entry.lastBytesTime).count();
+			if (ms > 0 && bytes >= entry.lastBytes)
+				kbps = (double)(bytes - entry.lastBytes) * 8.0 / (double)ms;
+		}
+		entry.lastBytes = bytes;
+		entry.lastBytesTime = now;
+
+		const uint32_t dropped = obs_output_get_frames_dropped(entry.output);
+		const uint32_t total = obs_output_get_total_frames(entry.output);
+		QString text = QString::fromUtf8(obs_module_text("StatusLiveBitrate")).arg((int)(kbps + 0.5));
+		if (total > 0) {
+			text += QString::fromUtf8(" · ");
+			text += QString::fromUtf8(obs_module_text("StatusDropped"))
+					.arg(100.0 * (double)dropped / (double)total, 0, 'f', 1);
+		}
+		SetOutputStatus(entry, text, QString::fromUtf8("rgb(0,180,120)"));
+	}
+}
+
 // Common styling things here
 auto canvasGroupStyle = QString("padding: 0px 0px 0px 0px;");                          // Main Canvas, Vertical Canvas
 auto canvasGroupHeaderStyle = QString("padding: 0px 0px 0px 0px; font-weight: bold;"); // header of each group
@@ -378,8 +479,8 @@ MultistreamDock::MultistreamDock(QWidget *parent) : QFrame(parent)
 		if (obs_get_video() != mainVideo) {
 			oldVideo.push_back(mainVideo);
 			mainVideo = obs_get_video();
-			for (auto it = outputs.begin(); it != outputs.end(); it++) {
-				auto venc = obs_output_get_video_encoder(std::get<obs_output_t *>(*it));
+			for (auto &entry : outputs) {
+				auto venc = obs_output_get_video_encoder(entry.output);
 				if (venc && !obs_encoder_active(venc))
 					obs_encoder_set_video(venc, mainVideo);
 			}
@@ -415,24 +516,30 @@ MultistreamDock::MultistreamDock(QWidget *parent) : QFrame(parent)
 			std::string name = streamGroup->objectName().toUtf8().constData();
 			if (name.empty())
 				continue;
-			for (auto it = outputs.begin(); it != outputs.end(); it++) {
-				if (std::get<std::string>(*it) != name)
-					continue;
+			auto *entry = FindOutput(name);
+			if (!entry || !entry->output)
+				continue;
 
-				auto active = obs_output_active(std::get<obs_output_t *>(*it));
-				foreach(QObject * c, streamGroup->children())
-				{
-					std::string cn = c->metaObject()->className();
-					if (cn == "QPushButton") {
-						auto pb = (QPushButton *)c;
-						if (pb->isChecked() != active) {
-							pb->setChecked(active);
-							outputButtonStyle(pb);
-						}
+			/* While connecting, obs_output_active() is false — never uncheck from the
+			 * timer or status flickers Idle → Connecting → Idle → Live. */
+			const bool active = obs_output_active(entry->output);
+			foreach(QObject * c, streamGroup->children())
+			{
+				std::string cn = c->metaObject()->className();
+				if (cn == "QPushButton") {
+					auto pb = (QPushButton *)c;
+					if (pb->objectName() != QStringLiteral("canvasStream"))
+						continue;
+					if (entry->stopping || entry->starting)
+						continue;
+					if (active && !pb->isChecked()) {
+						pb->setChecked(true);
+						outputButtonStyle(pb);
 					}
 				}
 			}
 		}
+		UpdateOutputStatuses();
 		auto ph = obs_get_proc_handler();
 		struct calldata cd;
 		calldata_init(&cd);
@@ -470,13 +577,15 @@ MultistreamDock::MultistreamDock(QWidget *parent) : QFrame(parent)
 MultistreamDock::~MultistreamDock()
 {
 	videoCheckTimer.stop();
-	for (auto it = outputs.begin(); it != outputs.end(); it++) {
-		auto old = std::get<obs_output_t *>(*it);
+	for (auto &entry : outputs) {
+		auto old = entry.output;
+		if (!old)
+			continue;
 		signal_handler_t *signal = obs_output_get_signal_handler(old);
 		signal_handler_disconnect(signal, "start", stream_output_start, this);
 		signal_handler_disconnect(signal, "stop", stream_output_stop, this);
 		auto service = obs_output_get_service(old);
-		if (obs_output_active(old)) {
+		if (obs_output_active(old) || obs_output_reconnecting(old)) {
 			obs_output_force_stop(old);
 		}
 		if (!exiting)
@@ -613,11 +722,11 @@ void MultistreamDock::LoadOutput(obs_data_t *output_data, bool vertical)
 		}
 	}
 	auto streamButton = new QPushButton;
-	for (auto it = outputs.begin(); it != outputs.end(); it++) {
-		if (std::get<std::string>(*it) != nameChars)
+	for (auto &entry : outputs) {
+		if (entry.name != nameChars)
 			continue;
 		if (obs_data_get_bool(output_data, "advanced")) {
-			auto output = std::get<obs_output_t *>(*it);
+			auto output = entry.output;
 			auto video_encoder = obs_output_get_video_encoder(output);
 			if (video_encoder &&
 			    strcmp(obs_encoder_get_id(video_encoder), obs_data_get_string(output_data, "video_encoder")) == 0) {
@@ -626,24 +735,36 @@ void MultistreamDock::LoadOutput(obs_data_t *output_data, bool vertical)
 				obs_data_release(ves);
 			}
 		}
-		std::get<QPushButton *>(*it) = streamButton;
+		entry.button = streamButton;
 	}
 	auto streamGroup = new QGroupBox;
 	streamGroup->setStyleSheet(outputGroupStyle);
 	streamGroup->setObjectName(name);
-	auto streamLayout = new QVBoxLayout;
-
-	auto l2 = new QHBoxLayout;
+	auto streamLayout = new QHBoxLayout;
+	streamLayout->setContentsMargins(9, 6, 9, 6);
+	streamLayout->setSpacing(8);
 
 	auto endpoint = QString::fromUtf8(obs_data_get_string(output_data, "stream_server"));
 	auto platformIconLabel = new QLabel;
 	auto platformIcon = ConfigUtils::getPlatformIconFromEndpoint(endpoint);
 
 	platformIconLabel->setPixmap(platformIcon.pixmap(outputPlatformIconSize, outputPlatformIconSize));
+	platformIconLabel->setAlignment(Qt::AlignVCenter);
 
-	l2->addWidget(platformIconLabel);
+	streamLayout->addWidget(platformIconLabel);
 
-	l2->addWidget(new QLabel(name), 1);
+	auto textColumn = new QVBoxLayout;
+	textColumn->setContentsMargins(0, 0, 0, 0);
+	textColumn->setSpacing(1);
+	auto nameLabel = new QLabel(name);
+	nameLabel->setStyleSheet(outputTitleStyle);
+	textColumn->addWidget(nameLabel);
+
+	auto statusLabel = new QLabel(QString::fromUtf8(obs_module_text("StatusIdle")));
+	statusLabel->setObjectName(QStringLiteral("outputStatus"));
+	statusLabel->setStyleSheet(QString::fromUtf8("color: palette(text);"));
+	textColumn->addWidget(statusLabel);
+	streamLayout->addLayout(textColumn, 1);
 
 	streamButton->setMinimumHeight(30);
 	streamButton->setObjectName(QStringLiteral("canvasStream"));
@@ -699,8 +820,20 @@ void MultistreamDock::LoadOutput(obs_data_t *output_data, bool vertical)
 			if (streamButton->isChecked()) {
 				blog(LOG_INFO, "[Aitum Multistream] start stream clicked '%s'",
 				     obs_data_get_string(output_data, "name"));
-				if (!StartOutput(output_data, streamButton))
+				const char *name2 = obs_data_get_string(output_data, "name");
+				if (auto *entry = FindOutput(name2 ? name2 : "")) {
+					entry->stopping = false;
+					entry->starting = true;
+					SetOutputStatus(*entry, QString::fromUtf8(obs_module_text("StatusConnecting")),
+							QString::fromUtf8("rgb(255,180,0)"));
+				}
+				if (!StartOutput(output_data, streamButton)) {
 					streamButton->setChecked(false);
+					if (auto *entry = FindOutput(name2 ? name2 : "")) {
+						entry->starting = false;
+						SetOutputStatus(*entry, QString::fromUtf8(obs_module_text("StatusIdle")));
+					}
+				}
 			} else {
 				bool stop = true;
 				bool warnBeforeStreamStop =
@@ -717,14 +850,23 @@ void MultistreamDock::LoadOutput(obs_data_t *output_data, bool vertical)
 					blog(LOG_INFO, "[Aitum Multistream] stop stream clicked '%s'",
 					     obs_data_get_string(output_data, "name"));
 					const char *name2 = obs_data_get_string(output_data, "name");
-					for (auto it = outputs.begin(); it != outputs.end(); it++) {
-						if (std::get<std::string>(*it) != name2)
-							continue;
-
-						obs_queue_task(
-							OBS_TASK_GRAPHICS,
-							[](void *param) { obs_output_stop((obs_output_t *)param); },
-							std::get<obs_output *>(*it), false);
+					auto *entry = FindOutput(name2 ? name2 : "");
+					if (!entry || !entry->output) {
+						streamButton->setChecked(false);
+					} else if (entry->stopping) {
+						blog(LOG_INFO, "[Aitum Multistream] stop already in progress for '%s'", name2);
+					} else {
+						entry->stopping = true;
+						entry->starting = false;
+						SetOutputStatus(*entry, QString::fromUtf8(obs_module_text("StatusStopping")),
+								QString::fromUtf8("rgb(255,180,0)"));
+						obs_output_t *out = entry->output;
+						/* Disable reconnect, then stop once on this thread.
+						 * Do NOT queue a second force_stop on the graphics thread —
+						 * stop can finish and release the output before that task runs
+						 * (EXC_BAD_ACCESS in obs_output_force_stop). */
+						obs_output_set_reconnect_settings(out, 0, 0);
+						obs_output_force_stop(out);
 					}
 				} else {
 					streamButton->setChecked(true);
@@ -735,8 +877,18 @@ void MultistreamDock::LoadOutput(obs_data_t *output_data, bool vertical)
 	}
 	//streamButton->setSizePolicy(sp2);
 	streamButton->setToolTip(QString::fromUtf8(obs_module_text("Stream")));
-	l2->addWidget(streamButton);
-	streamLayout->addLayout(l2);
+	streamLayout->addWidget(streamButton, 0, Qt::AlignVCenter);
+
+	if (!vertical) {
+		auto *entry = FindOutput(nameChars ? nameChars : "");
+		if (!entry) {
+			outputs.push_back({});
+			entry = &outputs.back();
+			entry->name = nameChars ? nameChars : "";
+		}
+		entry->button = streamButton;
+		entry->statusLabel = statusLabel;
+	}
 
 	streamGroup->setLayout(streamLayout);
 
@@ -836,18 +988,27 @@ bool MultistreamDock::StartOutput(obs_data_t *settings, QPushButton *streamButto
 	}
 
 	const char *name = obs_data_get_string(settings, "name");
-	for (auto it = outputs.begin(); it != outputs.end(); it++) {
-		if (std::get<std::string>(*it) != name)
+	for (auto it = outputs.begin(); it != outputs.end();) {
+		if (it->name != name || !it->output) {
+			++it;
 			continue;
-		auto old = std::get<obs_output_t *>(*it);
+		}
+		auto old = it->output;
 		auto service = obs_output_get_service(old);
-		if (obs_output_active(old)) {
+		signal_handler_t *signal = obs_output_get_signal_handler(old);
+		signal_handler_disconnect(signal, "start", stream_output_start, this);
+		signal_handler_disconnect(signal, "stop", stream_output_stop, this);
+		if (obs_output_active(old) || obs_output_reconnecting(old)) {
 			obs_output_force_stop(old);
 		}
 		obs_output_release(old);
 		obs_service_release(service);
-		outputs.erase(it);
-		break;
+		it->output = nullptr;
+		it->stopping = false;
+		it->starting = false;
+		it->lastBytes = 0;
+		it->lastBytesTime = {};
+		++it;
 	}
 	obs_encoder_t *venc = nullptr;
 	obs_encoder_t *aenc = nullptr;
@@ -974,12 +1135,44 @@ bool MultistreamDock::StartOutput(obs_data_t *settings, QPushButton *streamButto
 
 	obs_output_set_video_encoder(output, venc);
 	obs_output_set_audio_encoder(output, aenc, 0);
+
+	const char *codec = obs_encoder_get_codec(venc);
+	const bool twitch_hevc = codec && strcasecmp(codec, "hevc") == 0 && server &&
+				 (strstr(server, "live-video.net") || strstr(server, "twitch.tv") ||
+				  strstr(server, "twitch.com"));
+
 	obs_encoder_release(venc);
 	obs_encoder_release(aenc);
 
-	obs_output_start(output);
+	if (twitch_hevc) {
+		blog(LOG_WARNING,
+		     "[Aitum Multistream] '%s' is using HEVC to Twitch RTMP; Twitch expects H.264. "
+		     "Switch Advanced video encoder to Apple VT H264 (or x264).",
+		     name ? name : "");
+		QMessageBox::warning(this, QString::fromUtf8(obs_module_text("TwitchHevcTitle")),
+				     QString::fromUtf8(obs_module_text("TwitchHevcWarning")));
+		auto service = obs_output_get_service(output);
+		obs_output_release(output);
+		obs_service_release(service);
+		return false;
+	}
 
-	outputs.push_back({obs_data_get_string(settings, "name"), output, streamButton});
+	auto *entry = FindOutput(name ? name : "");
+	if (!entry) {
+		outputs.push_back({});
+		entry = &outputs.back();
+		entry->name = name ? name : "";
+	}
+	entry->output = output;
+	entry->button = streamButton;
+	entry->stopping = false;
+	entry->starting = true;
+	entry->lastBytes = 0;
+	entry->lastBytesTime = {};
+	SetOutputStatus(*entry, QString::fromUtf8(obs_module_text("StatusConnecting")),
+			QString::fromUtf8("rgb(255,180,0)"));
+
+	obs_output_start(output);
 
 	return true;
 }
@@ -988,44 +1181,76 @@ void MultistreamDock::stream_output_start(void *data, calldata_t *calldata)
 {
 	auto md = (MultistreamDock *)data;
 	auto output = (obs_output_t *)calldata_ptr(calldata, "output");
-	for (auto it = md->outputs.begin(); it != md->outputs.end(); it++) {
-		if (std::get<obs_output_t *>(*it) != output)
-			continue;
-		auto button = std::get<QPushButton *>(*it);
-		if (!button->isChecked()) {
-			QMetaObject::invokeMethod(
-				button,
-				[button, md] {
-					button->setChecked(true);
-					md->outputButtonStyle(button);
-				},
-				Qt::QueuedConnection);
-		}
+	auto *entry = md->FindOutput(output);
+	if (!entry)
+		return;
+
+	/* A reconnect can finish after the user clicked Stop — kill it immediately. */
+	if (entry->stopping) {
+		obs_output_set_reconnect_settings(output, 0, 0);
+		obs_output_force_stop(output);
+		return;
 	}
+
+	entry->stopping = false;
+	entry->starting = false;
+	auto button = entry->button;
+	if (button && !button->isChecked()) {
+		QMetaObject::invokeMethod(
+			button,
+			[button, md] {
+				button->setChecked(true);
+				md->outputButtonStyle(button);
+			},
+			Qt::QueuedConnection);
+	}
+	QMetaObject::invokeMethod(
+		md,
+		[md] { md->UpdateOutputStatuses(); },
+		Qt::QueuedConnection);
 }
 
 void MultistreamDock::stream_output_stop(void *data, calldata_t *calldata)
 {
 	auto md = (MultistreamDock *)data;
 	auto output = (obs_output_t *)calldata_ptr(calldata, "output");
-	for (auto it = md->outputs.begin(); it != md->outputs.end(); it++) {
-		if (std::get<obs_output_t *>(*it) != output)
-			continue;
-		auto button = std::get<QPushButton *>(*it);
-		if (button->isChecked()) {
-			QMetaObject::invokeMethod(
-				button,
-				[button, md] {
-					button->setChecked(false);
-					md->outputButtonStyle(button);
-				},
-				Qt::QueuedConnection);
-		}
-		if (!md->exiting)
-			QMetaObject::invokeMethod(button, [output] { obs_output_release(output); }, Qt::QueuedConnection);
-		md->outputs.erase(it);
-		break;
+	auto *entry = md->FindOutput(output);
+	if (!entry)
+		return;
+
+	/* Stale stop from a replaced output — ignore. */
+	if (entry->output != output)
+		return;
+
+	auto button = entry->button;
+	if (button && button->isChecked()) {
+		QMetaObject::invokeMethod(
+			button,
+			[button, md] {
+				button->setChecked(false);
+				md->outputButtonStyle(button);
+			},
+			Qt::QueuedConnection);
 	}
+
+	entry->stopping = false;
+	entry->starting = false;
+	entry->output = nullptr;
+	entry->lastBytes = 0;
+	entry->lastBytesTime = {};
+	if (entry->statusLabel) {
+		QMetaObject::invokeMethod(
+			entry->statusLabel,
+			[label = entry->statusLabel] {
+				label->setText(QString::fromUtf8(obs_module_text("StatusIdle")));
+				label->setStyleSheet(QString::fromUtf8("color: palette(text);"));
+			},
+			Qt::QueuedConnection);
+	}
+
+	if (!md->exiting)
+		QMetaObject::invokeMethod(
+			md, [output] { obs_output_release(output); }, Qt::QueuedConnection);
 	//const char *last_error = (const char *)calldata_ptr(calldata, "last_error");
 }
 
