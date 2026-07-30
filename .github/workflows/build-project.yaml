@@ -73,7 +73,9 @@ jobs:
 
   macos-build:
     name: Build for macOS 🍏
-    runs-on: macos-latest
+    # Pin macos-15: macos-latest is macOS 26 and no longer ships Xcode 16.x.
+    # OBS deps / CI presets here still expect an Xcode 16 toolchain.
+    runs-on: macos-15
     needs: check-event
     defaults:
       run:
@@ -90,8 +92,34 @@ jobs:
           : Set Up Environment 🔧
           if (( ${+RUNNER_DEBUG} )) setopt XTRACE
 
-          print '::group::Enable Xcode 16.1'
-          sudo xcode-select --switch /Applications/Xcode_16.1.0.app/Contents/Developer
+          print '::group::Select Xcode'
+          local -a candidates=(
+            /Applications/Xcode_16.4.app
+            /Applications/Xcode_16.4.0.app
+            /Applications/Xcode_16.3.app
+            /Applications/Xcode_16.3.0.app
+            /Applications/Xcode_16.2.app
+            /Applications/Xcode_16.2.0.app
+            /Applications/Xcode_16.1.app
+            /Applications/Xcode_16.1.0.app
+            /Applications/Xcode_16.app
+            /Applications/Xcode.app
+          )
+          local selected=''
+          for app (${candidates}) {
+            if [[ -d ${app}/Contents/Developer ]] {
+              selected=${app}
+              break
+            }
+          }
+          if [[ -z ${selected} ]] {
+            print '::error::No suitable Xcode.app found under /Applications'
+            ls -1 /Applications/Xcode*.app || true
+            exit 1
+          }
+          sudo xcode-select --switch ${selected}/Contents/Developer
+          print "Using ${selected}"
+          xcodebuild -version
           print '::endgroup::'
 
           print '::group::Clean Homebrew Environment'
