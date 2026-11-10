@@ -45,6 +45,10 @@ bool version_info_downloaded(void *param, struct file_download_data *file)
 
 bool obs_module_load(void)
 {
+	if (obs_get_module("aitum-stream-suite")) {
+		blog(LOG_ERROR, "[Aitum Multistream] Aitum Stream Suite detected, please uninstall it to use Aitum Multistream.");
+		return false;
+	}
 	blog(LOG_INFO, "[Aitum-Multistream] loaded version %s", PROJECT_VERSION);
 
 	const auto main_window = static_cast<QMainWindow *>(obs_frontend_get_main_window());
@@ -65,8 +69,15 @@ bool obs_module_load(void)
 
 void obs_module_post_load()
 {
-	if (multistream_dock)
+	if (obs_get_module("aitum-stream-suite")) {
+		obs_frontend_remove_dock("AitumMultistreamDock");
+		if (multistream_dock) {
+			multistream_dock->deleteLater();
+		}
+	} else if (multistream_dock) {
 		multistream_dock->LoadVerticalOutputs(true);
+		multistream_dock->LoadWebsocket();
+	}
 }
 
 void obs_module_unload()
@@ -677,6 +688,13 @@ MultistreamDock::MultistreamDock(QWidget *parent) : QFrame(parent)
 
 MultistreamDock::~MultistreamDock()
 {
+	if (vendor && obs_get_module("obs-websocket")) {
+		obs_websocket_vendor_unregister_request(vendor, "version");
+		obs_websocket_vendor_unregister_request(vendor, "get_outputs");
+		obs_websocket_vendor_unregister_request(vendor, "start_output");
+		obs_websocket_vendor_unregister_request(vendor, "stop_output");
+		vendor = nullptr;
+	}
 	videoCheckTimer.stop();
 	for (auto &entry : outputs) {
 		auto old = entry.output;
@@ -1268,7 +1286,17 @@ void MultistreamDock::stream_output_start(void *data, calldata_t *calldata)
 	if (!entry)
 		return;
 
-	/* A reconnect can finish after the user clicked Stop — kill it immediately. */
+	
+	if (md->vendor) {
+		auto d = obs_data_create();
+		auto name = obs_output_get_name(output);
+		if (name) {
+			obs_data_set_string(d, "name", name);
+		}
+		obs_websocket_vendor_emit_event(md->vendor, "output_started", d);
+		obs_data_release(d);
+	}
+/* A reconnect can finish after the user clicked Stop — kill it immediately. */
 	if (entry->stopping) {
 		obs_output_set_reconnect_settings(output, 0, 0);
 		obs_output_force_stop(output);
@@ -1301,7 +1329,17 @@ void MultistreamDock::stream_output_stop(void *data, calldata_t *calldata)
 	if (!entry)
 		return;
 
-	/* Stale stop from a replaced output — ignore. */
+	
+	if (md->vendor) {
+		auto d = obs_data_create();
+		auto name = obs_output_get_name(output);
+		if (name) {
+			obs_data_set_string(d, "name", name);
+		}
+		obs_websocket_vendor_emit_event(md->vendor, "output_stopped", d);
+		obs_data_release(d);
+	}
+/* Stale stop from a replaced output — ignore. */
 	if (entry->output != output)
 		return;
 
@@ -1588,4 +1626,180 @@ void AspectRatioPixmapLabel::resizeEvent(QResizeEvent *e)
 	UNUSED_PARAMETER(e);
 	if (!pix.isNull())
 		QLabel::setPixmap(scaledPixmap());
+}
+
+void MultistreamDock::LoadWebsocket()
+{
+	if (vendor) {
+		return;
+	}
+	vendor = obs_websocket_register_vendor("aitum-multistream");
+	if (!vendor) {
+		blog(LOG_ERROR, "[Aitum Multistream] Failed to register websocket vendor");
+		return;
+	}
+	obs_websocket_vendor_register_request(vendor, "version", vendor_request_version, this);
+	obs_websocket_vendor_register_request(vendor, "get_outputs", vendor_request_get_outputs, this);
+	obs_websocket_vendor_register_request(vendor, "start_output", vendor_request_start_output, this);
+	obs_websocket_vendor_register_request(vendor, "stop_output", vendor_request_stop_output, this);
+}
+
+void MultistreamDock::vendor_request_version(obs_data_t *request_data, obs_data_t *response_data, void *self)
+{
+	UNUSED_PARAMETER(request_data);
+	UNUSED_PARAMETER(self);
+	obs_data_set_string(response_data, "version", PROJECT_VERSION);
+	obs_data_set_bool(response_data, "success", true);
+}
+
+void MultistreamDock::vendor_request_get_outputs(obs_data_t *request_data, obs_data_t *response_data, void *self)
+{
+	UNUSED_PARAMETER(request_data);
+	auto md = (MultistreamDock *)self;
+	auto outputs3 = obs_data_array_create();
+	auto outputs2 = obs_data_get_array(md->current_config, "outputs");
+	obs_data_array_enum(
+		outputs2,
+		[](obs_data_t *o, void *data) {
+			auto outputs3 = (obs_data_array_t *)data;
+			auto o2 = obs_data_create();
+			obs_data_set_string(o2, "name", obs_data_get_string(o, "name"));
+			obs_data_set_bool(o2, "vertical", false);
+			obs_data_array_push_back(outputs3, o2);
+			obs_data_release(o2);
+		},
+		outputs3);
+	obs_data_array_release(outputs2);
+	if (md->vertical_outputs) {
+		obs_data_array_enum(
+			md->vertical_outputs,
+			[](obs_data_t *o, void *data) {
+				auto outputs3 = (obs_data_array_t *)data;
+				auto o2 = obs_data_create();
+				obs_data_set_string(o2, "name", obs_data_get_string(o, "name"));
+				obs_data_set_bool(o2, "vertical", true);
+				obs_data_array_push_back(outputs3, o2);
+				obs_data_release(o2);
+			},
+			outputs3);
+	}
+	obs_data_set_array(response_data, "outputs", outputs3);
+	obs_data_array_release(outputs3);
+	obs_data_set_bool(response_data, "success", true);
+}
+
+void MultistreamDock::vendor_request_start_output(obs_data_t *request_data, obs_data_t *response_data, void *self)
+{
+	auto md = (MultistreamDock *)self;
+	auto name = obs_data_get_string(request_data, "name");
+	if (!name || !strlen(name)) {
+		obs_data_set_bool(response_data, "success", false);
+		obs_data_set_string(response_data, "error", "Missing name");
+		return;
+	}
+	auto success = false;
+	auto sb = &success;
+	QMetaObject::invokeMethod(
+		md,
+		[md, sb, name] {
+			for (int i = 1; i < md->mainCanvasOutputLayout->count(); i++) {
+				auto item = md->mainCanvasOutputLayout->itemAt(i);
+				auto w = item->widget();
+				if (!w) {
+					continue;
+				}
+				auto oName = w->objectName().toStdString();
+				if (oName == name) {
+					auto button = w->findChild<QPushButton *>(QStringLiteral("canvasStream"));
+					if (button && !button->isChecked()) {
+						QMetaObject::invokeMethod(
+							button, [button] { button->click(); }, Qt::QueuedConnection);
+					}
+					*sb = true;
+					return;
+				}
+			}
+			for (int i = 0; i < md->verticalCanvasOutputLayout->count(); i++) {
+				auto item = md->verticalCanvasOutputLayout->itemAt(i);
+				auto w = item->widget();
+				if (!w) {
+					continue;
+				}
+				auto oName = w->objectName().toStdString();
+				if (oName == name) {
+					auto button = w->findChild<QPushButton *>(QStringLiteral("canvasStream"));
+					if (button && !button->isChecked()) {
+						QMetaObject::invokeMethod(
+							button, [button] { button->click(); }, Qt::QueuedConnection);
+					}
+					*sb = true;
+					return;
+				}
+			}
+		},
+		Qt::BlockingQueuedConnection);
+	if (success) {
+		obs_data_set_bool(response_data, "success", true);
+	} else {
+		obs_data_set_string(response_data, "error", "Output not found");
+		obs_data_set_bool(response_data, "success", false);
+	}
+}
+
+void MultistreamDock::vendor_request_stop_output(obs_data_t *request_data, obs_data_t *response_data, void *self)
+{
+	auto md = (MultistreamDock *)self;
+	auto name = obs_data_get_string(request_data, "name");
+	if (!name || !strlen(name)) {
+		obs_data_set_bool(response_data, "success", false);
+		obs_data_set_string(response_data, "error", "Missing name");
+		return;
+	}
+	auto success = false;
+	auto sb = &success;
+	QMetaObject::invokeMethod(
+		md,
+		[md, sb, name] {
+			for (int i = 1; i < md->mainCanvasOutputLayout->count(); i++) {
+				auto item = md->mainCanvasOutputLayout->itemAt(i);
+				auto w = item->widget();
+				if (!w) {
+					continue;
+				}
+				auto oName = w->objectName().toStdString();
+				if (oName == name) {
+					auto button = w->findChild<QPushButton *>(QStringLiteral("canvasStream"));
+					if (button && button->isChecked()) {
+						QMetaObject::invokeMethod(
+							button, [button] { button->click(); }, Qt::QueuedConnection);
+					}
+					*sb = true;
+					return;
+				}
+			}
+			for (int i = 0; i < md->verticalCanvasOutputLayout->count(); i++) {
+				auto item = md->verticalCanvasOutputLayout->itemAt(i);
+				auto w = item->widget();
+				if (!w) {
+					continue;
+				}
+				auto oName = w->objectName().toStdString();
+				if (oName == name) {
+					auto button = w->findChild<QPushButton *>(QStringLiteral("canvasStream"));
+					if (button && button->isChecked()) {
+						QMetaObject::invokeMethod(
+							button, [button] { button->click(); }, Qt::QueuedConnection);
+					}
+					*sb = true;
+					return;
+				}
+			}
+		},
+		Qt::BlockingQueuedConnection);
+	if (success) {
+		obs_data_set_bool(response_data, "success", true);
+	} else {
+		obs_data_set_string(response_data, "error", "Output not found");
+		obs_data_set_bool(response_data, "success", false);
+	}
 }

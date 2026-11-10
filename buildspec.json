@@ -1,33 +1,33 @@
 {
     "dependencies": {
         "obs-studio": {
-            "version": "31.0.0-fix1",
-            "baseUrl": "https://github.com/exeldro/obs-studio/archive/refs/tags",
+            "version": "33.0.1",
+            "baseUrl": "https://github.com/obsproject/obs-studio/archive/refs/tags",
             "label": "OBS sources",
             "hashes": {
-                "macos": "cd1eb62a9f9583fb028d3fb71523fc235b5f7c334793dc3f85baae10147e2c30",
-                "windows-x64": "1cc1cd66a10a7c2e8963c17fc8de4d706daa77f1013c2ed532b117fc689f8e01"
+                "macos": "0f228b960c099c6f6bca9f09a0c3516f14fdf1dd96e1d4702145c5d3ba8cba31",
+                "windows-x64": "0f228b960c099c6f6bca9f09a0c3516f14fdf1dd96e1d4702145c5d3ba8cba31"
             }
         },
         "prebuilt": {
-            "version": "2024-09-12",
+            "version": "2026-10-23",
             "baseUrl": "https://github.com/obsproject/obs-deps/releases/download",
             "label": "Pre-Built obs-deps",
             "hashes": {
-                "macos": "c857b211ee378772994b632036e1e5befe66b37e85286cb8e3cefc1435d5220a",
-                "windows-x64": "d4a4f194591766891ad3c0b267deec3c4b85239c8fe557273559927456aeedbb"
+                "macos": "6ded92c5d97f1d1b5effa07be13cc9f539826aa9c65013a15872328e39acffbf",
+                "windows-x64": "7508972a867a0ef68c26cd8bdba61fd999edd0a92fa9eb9585774de9bf51bfbe"
             }
         },
         "qt6": {
-            "version": "2024-09-12",
+            "version": "2026-10-23",
             "baseUrl": "https://github.com/obsproject/obs-deps/releases/download",
             "label": "Pre-Built Qt6",
             "hashes": {
-                "macos": "34a2de6b7f4d4d58fc5a15a4dba49a61d81a4045d0cedfc1a1f08c0dfb8047cf",
-                "windows-x64": "4d15ce13dbb0a8a2cabcce5ae0da5e80ee589b482a61b2025378465c1da32c4f"
+                "macos": "b216560cea8497207f9fc350c713716fb84aec6b973bb0ff8ac6add7734abad5",
+                "windows-x64": "78cd7a138464bb6edcdd3b85fcd63a5a7c69e369629963f3bc395bab74fb3f47"
             },
             "debugSymbols": {
-                "windows-x64": "dad2351a5c9cd438168e1ed8fb453a2534532252edb555f1001a5e8eb3f1bbd4"
+                "windows-x64": "5c97809dcb663a51e5b5f47983359d03a213a8c711c4b158a1b62429b8dff6be"
             }
         }
     },
@@ -38,7 +38,7 @@
     },
     "name": "aitum-multistream",
     "displayName": "Aitum Multistream (Encoder Share)",
-    "version": "1.0.9",
+    "version": "1.0.10",
     "author": "Aitum / Encoder Share Fork",
     "website": "https://aitum.tv",
     "email": "support@aitum.tv",

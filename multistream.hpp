@@ -1,6 +1,7 @@
 #pragma once
 
 #include "config-dialog.hpp"
+#include "obs-websocket-api.h"
 #include <obs.h>
 #include <obs-frontend-api.h>
 #include <QFrame>
@@ -60,6 +61,8 @@ private:
 	bool exiting = false;
 	bool finished_loading = false;
 
+	obs_websocket_vendor vendor = nullptr;
+
 	void LoadSettingsFile();
 	void LoadSettings();
 	void LoadOutput(obs_data_t *data, bool vertical);
@@ -79,6 +82,12 @@ private:
 	void storeMainStreamEncoders();
 
 	void AskUpdate();
+
+	void LoadWebsocket();
+	static void vendor_request_version(obs_data_t *request_data, obs_data_t *response_data, void *self);
+	static void vendor_request_get_outputs(obs_data_t *request_data, obs_data_t *response_data, void *self);
+	static void vendor_request_start_output(obs_data_t *request_data, obs_data_t *response_data, void *self);
+	static void vendor_request_stop_output(obs_data_t *request_data, obs_data_t *response_data, void *self);
 
 	QIcon streamActiveIcon = QIcon(":/aitum/media/streaming.svg");
 	QIcon streamInactiveIcon = QIcon(":/aitum/media/stream.svg");

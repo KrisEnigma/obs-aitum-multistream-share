@@ -54,7 +54,7 @@ cmake --build build
 
 ## Upstream
 
-- Base: Aitum Multistream 1.0.8
+- Base: Aitum Multistream 1.0.9 (+ OBS 33 / 1.0.10 fork)
 - Branch: `feature/peer-encoder-share`
 - Remote `upstream` → https://github.com/Aitum/obs-aitum-multistream.git
 
