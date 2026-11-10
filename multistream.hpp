@@ -83,7 +83,6 @@ private:
 
 	void AskUpdate();
 
-	void LoadWebsocket();
 	static void vendor_request_version(obs_data_t *request_data, obs_data_t *response_data, void *self);
 	static void vendor_request_get_outputs(obs_data_t *request_data, obs_data_t *response_data, void *self);
 	static void vendor_request_start_output(obs_data_t *request_data, obs_data_t *response_data, void *self);
@@ -104,6 +103,7 @@ public:
 	MultistreamDock(QWidget *parent = nullptr);
 	~MultistreamDock();
 	void LoadVerticalOutputs(bool firstLoad = true);
+	void LoadWebsocket();
 };
 
 class AspectRatioPixmapLabel : public QLabel {
